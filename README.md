@@ -1,2 +1,0 @@
-# IndoorMapping
-For mobile course

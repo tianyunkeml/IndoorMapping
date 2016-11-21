@@ -31,6 +31,8 @@ class paceAnalyser:
 		self.amplitude = []
 		self.time_series = []
 		for record in self.data:
+			if 'accelerometer_values' not in record or 'gyroscope_values' not in record or 'magnetometer_values' not in record:
+				continue
 			accer_x = record['accelerometer_values']['x']
 			accer_y = record['accelerometer_values']['y']
 			accer_z = record['accelerometer_values']['z']
@@ -41,6 +43,11 @@ class paceAnalyser:
 		plt.plot(self.time_series, self.amplitude)
 		plt.savefig('accer_plot.png')
 		plt.show()
+
+if __name__ == '__main__':
+	pa = paceAnalyser('10rounds.data')
+	pa.readData()
+	pa.readPace()
 
 
 

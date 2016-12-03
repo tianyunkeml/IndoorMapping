@@ -15,6 +15,7 @@ class feature_extractor(object):
 		self.params = params
 		self.wifimarks = []
 		self.gyros = []
+		self.gyros_y = []
 		self.clockwises = []
 		self.gyro_ts = []
 		self.mags = []
@@ -24,6 +25,7 @@ class feature_extractor(object):
 		self.corr_cluster = []
 		self.num_clusters = 0
 		self.max_occurence = 0
+		self.turning_dict = {}
 		with open(fn, 'r') as f:
 			data = json.load(f)
 			self.data = data
@@ -33,6 +35,7 @@ class feature_extractor(object):
 			if 'gyroscope_values' not in record or 'magnetometer_values' not in record:
 				continue
 			self.gyros.append(math.sqrt(record['gyroscope_values']['x'] ** 2 + record['gyroscope_values']['y'] ** 2 + record['gyroscope_values']['z'] ** 2))
+			self.gyros_y.append(record['gyroscope_values']['y'])
 			clockwise = 1 if record['gyroscope_values']['y'] > 0 else -1
 			self.clockwises.append(clockwise)
 			self.gyro_ts.append(record['timestamp'])
@@ -63,117 +66,189 @@ class feature_extractor(object):
 		# print '**********************'
 		return [result, ts]
 
-	def is_U_turn(self, timestamp):
-		turning_time = 2200
-		ind = self.gyro_ts.index(timestamp)
-		ts = self.gyro_ts
-		k = ind + 1
-		endpoint = timestamp
-		sign = 0
-		angle = 0
-		if k >= len(self.gyros) - 1:
-			return False
-		while(ts[k] - timestamp < turning_time):
-			interval = (ts[k] - ts[k - 1]) / 1000
-			angle += interval * self.gyros[k - 1] * self.clockwises[k - 1]
-			k += 1
-			if self.gyros[k] > self.params['uturn_thresh2'] and sign == 0:
-				endpoint = self.gyro_ts[k]
+	def turn_dict(self):
+		[smt_gyros, smt_ts] = self.smooth(self.gyros, self.gyro_ts, self.params['gyro_factor'], self.params['gyro_number'])
+		turn_point_ts = []
+		turn_point_value = []
+		for i in range(1, len(smt_gyros) - 3):
+			if smt_gyros[i] > smt_gyros[i - 1] and smt_gyros[i] > smt_gyros[i + 1]:
+				if smt_gyros[i] > self.params['uturn_thresh1'] - 0.1 and (len(turn_point_ts) == 0 or smt_ts[i] - turn_point_ts[-1] > 1000):
+					turn_point_ts.append(smt_ts[i])
+					turn_point_value.append(smt_gyros[i])
+
+		half_u_turn = True
+		for i in range(len(turn_point_ts)):
+			if turn_point_value[i] < self.params['turn_type_thresh']:
+				label = 'normal_turn'
+			elif half_u_turn == True:
+				label = 'half_u_turn'
+				half_u_turn = not half_u_turn
 			else:
-				sign = 1
-			if k >= len(self.gyros) - 1:
-				break
-		if abs(angle) > self.params['uturn_angle']:
-			return endpoint
-		else:
-			return False
+				label = 'period_u_turn'
+				half_u_turn = not half_u_turn
+			ind = smt_ts.index(turn_point_ts[i])
+			k = 0
+			low_stop_sign = 0
+			high_stop_sign = 0
+			low_bound = turn_point_ts[i]
+			high_bound = turn_point_ts[i]
+			while low_stop_sign * high_stop_sign == 0:
+				k += 1
+				if low_stop_sign == 0 and smt_gyros[ind - k] > self.params['uturn_thresh2']:
+					low_bound = smt_ts[ind - k]
+				else:
+					low_stop_sign = 1
+				if high_stop_sign == 0 and smt_gyros[ind + k] > self.params['uturn_thresh2']:
+					high_bound = smt_ts[ind + k]
+				else:
+					high_stop_sign = 1
+			self.turning_dict[(low_bound, high_bound)] = label
+
+	def turn_type(self, timestamp):
+		# turning_time = 2200
+		# ind = self.gyro_ts.index(timestamp)
+		# ts = self.gyro_ts
+		# k = ind + 1
+		# endpoint = timestamp
+		# sign = 0
+		# angle = 0
+		# if k >= len(self.gyros) - 1:
+		# 	return False
+		# while(ts[k] - timestamp < turning_time):
+		# 	interval = (ts[k] - ts[k - 1]) / 1000
+		# 	angle += interval * self.gyros[k - 1] * self.clockwises[k - 1]
+		# 	k += 1
+		# 	if self.gyros[k] > self.params['uturn_thresh2'] and sign == 0:
+		# 		endpoint = self.gyro_ts[k]
+		# 	else:
+		# 		sign = 1
+		# 	if k >= len(self.gyros) - 1:
+		# 		break
+		# if abs(angle) > self.params['uturn_angle']:
+		# 	return endpoint
+		# else:
+		# 	return False
+		for k, v in self.turning_dict.items():
+			low = k[0]
+			high = k[1]
+			if timestamp > low and timestamp < high:
+				return v
+		return 'no_turn'
 
 	def get_direction(self):
 		origin = self.params['origin_direction']
 		last_ts = min(self.timestamp)
 		last_direct = origin
-		last_clock = 1
 		last_gyro = 0
-		turning = 'no'
-		full = False
-		endpoint = 0
+		last_status = 'no_turn'
+		before_turn = 0
+
 		for record in self.data:
-			if 'gyroscope_values' not in  record:
-				interval = 1.0 * (record['timestamp'] - last_ts) / 1000
-				clockwise = last_clock
-				gyro = last_gyro
-				current_direct = (last_direct + interval * gyro * clockwise) % (2 * math.pi)
-				self.directions[record['timestamp']] = current_direct
-				last_ts = record['timestamp']
-				last_direct = current_direct
-				last_clock = clockwise
-				last_gyro = gyro
-				continue
-			if record['timestamp'] > endpoint:
-				turning = 'no'
+			current_status = self.turn_type(record['timestamp'])
+			if last_status == 'no_turn' and (current_status == 'half_u_turn' or current_status == 'period_u_turn'):
+				before_turn = last_direct	
+			if (last_status == 'half_u_turn' or last_status == 'period_u_turn') and current_status == 'no_turn':
+				current_direct = (before_turn + math.pi) % (2 * math.pi) if last_status == 'half_u_turn' else origin
 			else:
+				gyro = last_gyro if 'gyroscope_values' not in  record else record['gyroscope_values']['y']
 				interval = 1.0 * (record['timestamp'] - last_ts) / 1000
-				clockwise = 1 if record['gyroscope_values']['y'] > 0 else -1
-				gyro = math.sqrt(record['gyroscope_values']['x'] ** 2 + record['gyroscope_values']['y'] ** 2 + record['gyroscope_values']['z'] ** 2)
-				current_direct = (last_direct + interval * gyro * clockwise) % (2 * math.pi)
-				self.directions[record['timestamp']] = current_direct
-				last_ts = record['timestamp']
-				last_direct = current_direct
-				last_clock = clockwise
-				last_gyro = gyro
-				continue
-			uturn = self.is_U_turn(record['timestamp'])
-			if not uturn == False:
-				turning = 'yes'
-				endpoint = uturn
-				clockwise = 1 if record['gyroscope_values']['y'] > 0 else -1
-				gyro = math.sqrt(record['gyroscope_values']['x'] ** 2 + record['gyroscope_values']['y'] ** 2 + record['gyroscope_values']['z'] ** 2)
-				current_direct = (last_direct + math.pi) % (2 * math.pi) if not full else origin
-				full = not full
-				self.directions[record['timestamp']] = current_direct
-				last_direct = current_direct
-				last_ts = record['timestamp']
-				last_clock = clockwise
-				last_gyro = gyro
-				continue
-			
-			interval = 1.0 * (record['timestamp'] - last_ts) / 1000
-			clockwise = 1 if record['gyroscope_values']['y'] > 0 else -1
-			gyro = math.sqrt(record['gyroscope_values']['x'] ** 2 + record['gyroscope_values']['y'] ** 2 + record['gyroscope_values']['z'] ** 2)
-			current_direct = (last_direct + interval * gyro * clockwise) % (2 * math.pi)
+				current_direct = (last_direct + interval * gyro) % (2 * math.pi)
 			self.directions[record['timestamp']] = current_direct
 			last_ts = record['timestamp']
 			last_direct = current_direct
-			last_clock = clockwise
 			last_gyro = gyro
+			last_status = current_status
+
+		# origin = self.params['origin_direction']
+		# last_ts = min(self.timestamp)
+		# last_direct = origin
+		# last_clock = 1
+		# last_gyro = 0
+		# turning = 'no'
+		# full = False
+		# endpoint = 0
+		# for record in self.data:
+		# 	if 'gyroscope_values' not in  record:
+		# 		interval = 1.0 * (record['timestamp'] - last_ts) / 1000
+		# 		clockwise = last_clock
+		# 		gyro = last_gyro
+		# 		current_direct = (last_direct + interval * gyro * clockwise) % (2 * math.pi)
+		# 		self.directions[record['timestamp']] = current_direct
+		# 		last_ts = record['timestamp']
+		# 		last_direct = current_direct
+		# 		last_clock = clockwise
+		# 		last_gyro = gyro
+		# 		continue
+		# 	if record['timestamp'] > endpoint:
+		# 		turning = 'no'
+		# 	else:
+		# 		interval = 1.0 * (record['timestamp'] - last_ts) / 1000
+		# 		clockwise = 1 if record['gyroscope_values']['y'] > 0 else -1
+		# 		gyro = math.sqrt(record['gyroscope_values']['x'] ** 2 + record['gyroscope_values']['y'] ** 2 + record['gyroscope_values']['z'] ** 2)
+		# 		current_direct = (last_direct + interval * gyro * clockwise) % (2 * math.pi)
+		# 		self.directions[record['timestamp']] = current_direct
+		# 		last_ts = record['timestamp']
+		# 		last_direct = current_direct
+		# 		last_clock = clockwise
+		# 		last_gyro = gyro
+		# 		continue
+		# 	uturn = self.is_U_turn(record['timestamp'])
+		# 	if not uturn == False:
+		# 		turning = 'yes'
+		# 		endpoint = uturn
+		# 		clockwise = 1 if record['gyroscope_values']['y'] > 0 else -1
+		# 		gyro = math.sqrt(record['gyroscope_values']['x'] ** 2 + record['gyroscope_values']['y'] ** 2 + record['gyroscope_values']['z'] ** 2)
+		# 		current_direct = (last_direct + math.pi) % (2 * math.pi) if not full else origin
+		# 		full = not full
+		# 		self.directions[record['timestamp']] = current_direct
+		# 		last_direct = current_direct
+		# 		last_ts = record['timestamp']
+		# 		last_clock = clockwise
+		# 		last_gyro = gyro
+		# 		continue
+			
+		# 	interval = 1.0 * (record['timestamp'] - last_ts) / 1000
+		# 	clockwise = 1 if record['gyroscope_values']['y'] > 0 else -1
+		# 	gyro = math.sqrt(record['gyroscope_values']['x'] ** 2 + record['gyroscope_values']['y'] ** 2 + record['gyroscope_values']['z'] ** 2)
+		# 	current_direct = (last_direct + interval * gyro * clockwise) % (2 * math.pi)
+		# 	self.directions[record['timestamp']] = current_direct
+		# 	last_ts = record['timestamp']
+		# 	last_direct = current_direct
+		# 	last_clock = clockwise
+		# 	last_gyro = gyro
 
 	def displacement(self, ts1, ts2):
 		ind1 = self.time_series.index(ts1)
 		ind2 = self.time_series.index(ts2)
 		displace = [0, 0]
 		step_len = self.params['step_length']
+		last_ts = 0
 		for i in range(ind1 + 1, ind2 - 1):
-			sign = 0
+			# sign = 0
+			# ts = self.time_series[i]
+			# if ts not in self.gyro_ts:
+			# 	sign = 1
+			# else:
+			# 	ind = self.gyro_ts.index(ts)
+			# 	if abs(self.gyros[ind]) < self.params['uturn_thresh1']:
+			# 		sign = 1
 			ts = self.time_series[i]
-			if ts not in self.gyro_ts:
-				sign = 1
-			else:
-				ind = self.gyro_ts.index(ts)
-				if abs(self.gyros[ind]) < self.params['uturn_thresh1']:
-					sign = 1
-			if self.amplitude[i] > self.amplitude[i - 1] and self.amplitude[i] > self.amplitude[i + 1] and sign == 1:
-				direct = self.directions[ts1]
+			if self.turn_type(ts) != 'no_turn':
+				continue
+			if self.amplitude[i] > self.amplitude[i - 1] and self.amplitude[i] > self.amplitude[i + 1] and ts - last_ts > 300:
+				direct = self.directions[ts]
 				displace_x = step_len * math.cos(direct)
 				displace_y = step_len * math.sin(direct)
 				displace[0] += displace_x
 				displace[1] += displace_y
+				last_ts = ts
 				# print 'ssssssssssssssssss ' + str(direct)
 				# print displace
 		return displace
 
-	def find_3common_bssid(self, rssi_dict):
-		lengths = [0, 0, 0]
-		corr_bssid = [0, 0, 0]
+	def find_8common_bssid(self, rssi_dict):
+		lengths = [0, 0, 0, 0, 0, 0, 0, 0]
+		corr_bssid = [0, 0, 0, 0, 0, 0, 0, 0]
 		for k, v in rssi_dict.items():
 			if len(v) > min(lengths) and max(v['RSSI']) > self.params['thresh']:
 				ind = lengths.index(min(lengths))
@@ -184,10 +259,25 @@ class feature_extractor(object):
 		return corr_bssid
 
 	def find_marks(self, rssi_dict):
+
+		def is_tipping_point(l1, ind):
+			ref = l1[ind] - l1[ind - 1]
+			sampling = [1,3,5,9,15]
+			for s in sampling:
+				if ind - s in range(len(l1)):
+					if ref * (l1[ind] - l1[ind - s]) < 0:
+						return False
+				if ind + s in range(len(l1)):
+					if ref * (l1[ind] - l1[ind + s]) < 0:
+						return False
+			return True
+
 		ts_shrink = 1000000
-		common_bssid = self.find_3common_bssid(rssi_dict)
+		common_bssid = self.find_8common_bssid(rssi_dict)
 		mark_dist = {}
 		for k, v in rssi_dict.items():
+			print '6666666666666'
+			last_ts = 0
 			rssi = v['RSSI']
 			ts = v['timestamp']
 			[rssi, ts] = self.smooth(rssi, ts, self.params['factor'], self.params['number'])
@@ -197,9 +287,11 @@ class feature_extractor(object):
 				continue
 			for i in range(1, len(rssi) - 1):
 				timestamp = ts[i]
-				if (rssi[i] - rssi[i - 1]) * (rssi[i] - rssi[i + 1]) > 0:
+				if is_tipping_point(rssi, i):
+					print str(timestamp) + '      ' + str(timestamp - last_ts)
+					last_ts = timestamp
 					mark = []
-					mark.append(rssi[i])
+					# mark.append(rssi[i])            #XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 					for n in range(len(common_bssid)):
 						thisId = common_bssid[n]
 						id_rssi = rssi_dict[thisId]
@@ -207,39 +299,38 @@ class feature_extractor(object):
 							ind = id_rssi['timestamp'].index(timestamp)
 							mark.append(id_rssi['RSSI'][ind])
 						else:
-							mark.append(0)
+							mark.append(-95)
 						
-					if timestamp in self.directions:
-						mark.append(5 * math.cos(self.directions[timestamp]))
-						mark.append(5 * math.sin(self.directions[timestamp]))
-					else:
-						mark.append(0)
-						mark.append(0)
 					ind = self.time_series.index(timestamp)
-					mark.append(self.mags[ind] / 1.5)
+					mark.append(self.mags[ind] * 1.5)
 					mark.append(float(timestamp) / ts_shrink)
 					self.wifimarks.append(mark)
 		[smt_gyros, smt_ts] = self.smooth(self.gyros, self.gyro_ts, self.params['gyro_factor'], self.params['gyro_number'])
+		last_status = 'no_turn'
 		for n in range(1, len(smt_ts) - 1):
-			if (smt_gyros[n] - smt_gyros[n - 1]) * (smt_gyros[n] - smt_gyros[n + 1]) > 0:
-				if smt_gyros[n] > self.params['gyro_thresh'] and smt_gyros[n] < 1.1:  # need revision
-					mark = []
-					clock = self.clockwises[n]
-					mark.append(clock * 100)
-					mark.append(clock * 100)
-					mark.append(clock * 100)
-					mark.append(clock * 100)
-					mark.append(clock * 100)
-					mark.append(clock * 100)
-					mark.append(clock * 100)
-					mark.append(float(smt_ts[n]) / ts_shrink)
-					self.wifimarks.append(mark)
+			current_status = self.turn_type(smt_ts[n])
+			if last_status == 'no_turn' and current_status == 'normal_turn': # need revision
+				mark = []
+				clock = self.clockwises[n]
+				# mark.append(clock * 100)
+				mark.append(clock * 100)
+				mark.append(clock * 100)
+				mark.append(clock * 100)
+				mark.append(clock * 100)
+				mark.append(clock * 100)
+				mark.append(clock * 100)
+				mark.append(clock * 100)
+				mark.append(clock * 100)
+				mark.append(clock * 100)
+				mark.append(float(smt_ts[n]) / ts_shrink)
+				self.wifimarks.append(mark)
+			last_status = current_status
 		return
 
 	def cluster(self):
 		maxd = self.params['max_d']
 		# print self.wifimarks
-		z = linkage(self.wifimarks, 'complete', 'euclidean')
+		z = linkage(self.wifimarks, 'average', 'euclidean')
 		plt.figure(figsize = (25, 10))
 		plt.title('Hierarchical Clustering Dendrogram')
 		plt.xlabel('wifimarks')
@@ -247,7 +338,7 @@ class feature_extractor(object):
 		dendrogram(
 		    z,
 		    leaf_rotation = 90.,  # rotates the x axis labels
-		    leaf_font_size = 8.,  # font size for the x axis labels
+		    leaf_font_size = 3.,  # font size for the x axis labels
 		)
 		plt.savefig('dendrogram.png')
 		plt.show()
@@ -278,6 +369,17 @@ class feature_extractor(object):
 					ind = marks.index(m)
 					self.corr_cluster.append(clusters[ind])
 					break
+		for c in range(1, max(clusters) + 1):
+			if c not in self.corr_cluster:
+				continue
+			ts_ind = [i for i in range(len(self.corr_cluster)) if self.corr_cluster[i] == c]
+			ts_seq = [self.sorted_ts[i] for i in ts_ind]
+			corr_x = [i for i in range(len(ts_ind))]
+			plt.scatter(ts_seq, corr_x)
+			plt.legend()
+			plt.savefig('cluster_' + str(c)  + '.png')
+			plt.show()
+
 
 		# print self.sorted_ts
 		# print self.corr_cluster
@@ -376,7 +478,10 @@ class feature_extractor(object):
 		print pij
 		x = [pij[k, 0] for k in range(len(pij))]
 		y = [pij[k, 1] for k in range(len(pij))]
-		plt.scatter(x, y)
+		while 0 in x:
+			x.remove(0)
+			y.remove(0)
+		plt.scatter(y, x)
 		plt.legend()
 		plt.savefig('dot_map.png')
 		plt.show()
@@ -397,6 +502,7 @@ class feature_extractor(object):
 		timestamps = []
 		accels = []
 		gyros = []
+		self.turn_dict()
 		for record in self.data:
 			if 'access_points' not in record or 'accelerometer_values' not in record or 'gyroscope_values' not in record or 'magnetometer_values' not in record:
 				continue
@@ -469,9 +575,12 @@ class feature_extractor(object):
 	
 
 if __name__ == '__main__':
-	params = {'spring_step': 0.4, 'gyro_thresh': 0.75, 'gyro_factor': 0.25, 'gyro_number':30, 'minimum_rounds': 6, 'max_d': 8, 'step_length': 2, 'thresh': -65, 'factor': 0.03, 'number': 200, 'gyro_factor': 0.2, 'gyro_number': 30, 'origin_direction': 0, 'uturn_thresh1': 0.6, 'uturn_thresh2': 0.4, 'uturn_angle': 2.4}
-	fe = feature_extractor('10rounds.data_json', params)
+	params = {'turn_type_thresh': 1.1, 'gyro_y_only': True, 'spring_step': 0.4, 'gyro_thresh': 0.75, 'gyro_factor': 0.3, 'gyro_number':20, 'minimum_rounds': 10, 'max_d': 14, 'step_length': 2, 'thresh': -58, 'factor': 0.03, 'number': 200, 'gyro_factor': 0.2, 'gyro_number': 30, 'origin_direction': 0, 'uturn_thresh1': 0.6, 'uturn_thresh2': 0.4, 'uturn_angle': 2.4}
+	fe = feature_extractor('12rounds.data_json', params)
 	# fe.get_direction()
 	fe.rssi_analyzer()
+	l1 = 58
+	l2 = 13
+	l3 = 46
 
 

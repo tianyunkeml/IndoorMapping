@@ -45,7 +45,7 @@ class paceAnalyser:
 		plt.show()
 
 if __name__ == '__main__':
-	pa = paceAnalyser('10rounds.data')
+	pa = paceAnalyser('12rounds.data')
 	pa.readData()
 	pa.readPace()
 

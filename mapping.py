@@ -149,7 +149,7 @@ class mapping(object):
 			if last_status == 'no_turn' and (current_status == 'half_u_turn' or current_status == 'period_u_turn'):
 				before_turn = last_direct	
 			if (last_status == 'half_u_turn' or last_status == 'period_u_turn') and current_status == 'no_turn':
-				current_direct = (before_turn + math.pi) % (2 * math.pi) if last_status == 'half_u_turn' else origin
+				current_direct = self.params['back_direct'] if last_status == 'half_u_turn' else origin
 			else:
 				gyro = last_gyro if 'gyroscope_values' not in  record else record['gyroscope_values']['y']
 				interval = 1.0 * (record['timestamp'] - last_ts) / 1000
@@ -159,6 +159,50 @@ class mapping(object):
 			last_direct = current_direct
 			last_gyro = gyro
 			last_status = current_status
+
+		if self.params['vertical_turn']:
+			for record in self.data:
+				current_status = self.turn_type(record['timestamp'])
+				if last_status == 'no_turn' and (current_status == 'normal_turn' or current_status == 'half_u_turn' or current_status == 'period_u_turn'):
+					before_turn = last_direct	
+				if (last_status == 'normal_turn' or last_status == 'half_u_turn' or last_status == 'period_u_turn') and current_status == 'no_turn':
+					# current_direct = self.params['back_direct'] if last_status == 'half_u_turn' else origin
+					if last_status == 'half_u_turn':
+						current_direct = self.params['back_direct']
+					elif last_status == 'period_u_turn':
+						current_direct = origin
+					else:
+						gyro_ind = self.gyro_ts.index(record['timestamp'])
+						direct_sum = sum([self.gyros_y[gyro_ind - x] for x in range(0,12)])
+						turn_direct = 1 if direct_sum > 0 else -1
+						current_direct = (before_turn + turn_direct * math.pi / 2) % (2 * math.pi)
+				else:
+					gyro = last_gyro if 'gyroscope_values' not in  record else record['gyroscope_values']['y']
+					interval = 1.0 * (record['timestamp'] - last_ts) / 1000
+					current_direct = (last_direct + interval * 0) % (2 * math.pi)
+				self.directions[record['timestamp']] = current_direct
+				last_ts = record['timestamp']
+				last_direct = current_direct
+				last_gyro = gyro
+				last_status = current_status
+		else:
+			for record in self.data:
+				current_status = self.turn_type(record['timestamp'])
+				if last_status == 'no_turn' and (current_status == 'half_u_turn' or current_status == 'period_u_turn'):
+					before_turn = last_direct	
+				if (last_status == 'half_u_turn' or last_status == 'period_u_turn') and current_status == 'no_turn':
+					current_direct = self.params['back_direct'] if last_status == 'half_u_turn' else origin
+				else:
+
+					gyro = 0 if 'gyroscope_values' not in  record  or abs(record['gyroscope_values']['y']) < self.params['uturn_thresh2'] else record['gyroscope_values']['y']
+					interval = 1.0 * (record['timestamp'] - last_ts) / 1000
+					current_direct = (last_direct + interval * gyro) % (2 * math.pi)
+				self.directions[record['timestamp']] = current_direct
+				last_ts = record['timestamp']
+				last_direct = current_direct
+				last_gyro = gyro
+				last_status = current_status
+
 
 		# origin = self.params['origin_direction']
 		# last_ts = min(self.timestamp)
@@ -256,6 +300,8 @@ class mapping(object):
 			# 	print '############'
 		# print displace
 		# print '888888888888'
+		print str(ts1) + ', ' + str(ts2) + ': ' + str(ts2 - ts1)
+		print displace
 		return displace
 
 	def find_8common_bssid(self, rssi_dict):
@@ -317,21 +363,46 @@ class mapping(object):
 					self.wifimarks.append(mark)
 		[smt_gyros, smt_ts] = self.smooth(self.gyros, self.gyro_ts, self.params['gyro_factor'], self.params['gyro_number'])
 		last_status = 'no_turn'
+		turn_index = 0
+		index_change = 1
+		last_tsts = 0
+
+		test_runs = self.params['run_times']
+		run_time_count = 0
 		for n in range(1, len(smt_ts) - 1):
 			current_status = self.turn_type(smt_ts[n])
-			if last_status == 'no_turn' and current_status == 'normal_turn': # need revision
+			if last_status == 'no_turn' and current_status == 'period_u_turn':
+				run_time_count += 1
+			if run_time_count > test_runs:
+				break
+			if last_status == 'period_u_turn' and current_status == 'no_turn':
+				print smt_ts[n] - last_tsts
+				print '***********'
+				last_tsts = smt_ts[n]
+				turn_index = 0
+				index_change = 1
+			if last_status == 'half_u_turn' and current_status == 'no_turn':
+				turn_index += 1
+				index_change = -1
+			if (last_status == 'no_turn' and current_status == 'normal_turn') or (last_status == 'period_u_turn' and current_status == 'no_turn') or (last_status == 'half_u_turn' and current_status == 'no_turn'): # need revision
+				turn_index += index_change
+				if last_status == 'period_u_turn' and current_status == 'no_turn':
+					turn_index = 0
+				if last_status == 'half_u_turn' and current_status == 'no_turn':
+					turn_index = 5
+				print turn_index
 				mark = []
 				clock = self.clockwises[n]
 				# mark.append(clock * 100)
-				mark.append(clock * 100)
-				mark.append(clock * 100)
-				mark.append(clock * 100)
-				mark.append(clock * 100)
-				mark.append(clock * 100)
-				mark.append(clock * 100)
-				mark.append(clock * 100)
-				mark.append(clock * 100)
-				mark.append(clock * 100)
+				mark.append(100 * turn_index)
+				mark.append(100 * turn_index)
+				mark.append(100 * turn_index)
+				mark.append(100 * turn_index)
+				mark.append(100 * turn_index)
+				mark.append(100 * turn_index)
+				mark.append(100 * turn_index)
+				mark.append(100 * turn_index)
+				mark.append(100 * turn_index)
 				mark.append(float(smt_ts[n]) / ts_shrink)
 				self.wifimarks.append(mark)
 			last_status = current_status
@@ -351,7 +422,8 @@ class mapping(object):
 		    leaf_font_size = 3.,  # font size for the x axis labels
 		)
 		plt.savefig('dendrogram.png')
-		plt.show()
+		plt.clf()
+		# plt.show()
 		clusters = fcluster(z, maxd, criterion='distance')
 		clusters = clusters.tolist()
 		marks = self.wifimarks
@@ -388,7 +460,8 @@ class mapping(object):
 			plt.scatter(ts_seq, corr_x)
 			plt.legend()
 			plt.savefig('cluster_' + str(c)  + '.png')
-			plt.show()
+			plt.clf()
+			# plt.show()
 
 
 		# print self.sorted_ts
@@ -453,7 +526,7 @@ class mapping(object):
 				if k >= len(self.corr_cluster) - 1:
 					break
 		k = 0
-		while(k < 50):
+		while(k < 30):
 			for i in range(max_cluster_ind + 1):
 				for j in range(max_cluster_ind + 1):
 					if fill_ij[i, j] > 0:
@@ -495,10 +568,11 @@ class mapping(object):
 		while 0 in x:
 			x.remove(0)
 			y.remove(0)
-		plt.scatter(y, x)
+		plt.scatter(x, y)
 		plt.legend()
-		plt.savefig('dot_map.png')
-		plt.show()
+		plt.savefig('dot_map_' + str(self.params['run_times']) + 'rounds_' + 'vertical_' + str(self.params['vertical_turn']) + '.png')
+		plt.clf()
+		# plt.show()
 
 
 			# rij[current_cluster, next_cluster, fill_ij[current_cluster, next_cluster]] = displace
@@ -550,7 +624,8 @@ class mapping(object):
 		plt.scatter(kk, vv)
 		plt.legend()
 		plt.savefig('direction.png')
-		plt.show()
+		plt.clf()
+		# plt.show()
 		self.Arturia()
 
 		for k, v in rssi_dict.items():
@@ -565,34 +640,48 @@ class mapping(object):
 				plt.plot(ts, rssi, label = str(lb))
 		plt.legend()
 		plt.savefig('rssi.png')
-		plt.show()
+		plt.clf()
+		# plt.show()
 
 
 		[smt_mags, smt_ts] = self.smooth(mags, timestamps, 0.05, 50)
 		plt.plot(smt_ts, smt_mags)
 		plt.legend()
 		plt.savefig('magnet.png')
-		plt.show()
+		plt.clf()
+		# plt.show()
 
 		# [smt_accels, smt_ts] = self.smooth(accels, timestamps, 0.05, 50)
 		plt.plot(timestamps, accels)
 		plt.legend()
 		plt.savefig('accelerate.png')
-		plt.show()
+		plt.clf()
+		# plt.show()
 
 		[smt_gyros, smt_ts] = self.smooth(self.gyros, self.gyro_ts, 0.3, 20)
 		plt.plot(smt_ts, smt_gyros)
 		plt.legend()
 		plt.savefig('gyroscope.png')
-		plt.show()
+		plt.clf()
+		# plt.show()
 
 	
 
 if __name__ == '__main__':
-	params = {'turn_type_thresh': 1.1, 'gyro_y_only': True, 'spring_step': 0.4, 'gyro_thresh': 0.75, 'gyro_factor': 0.3, 'gyro_number':20, 'minimum_rounds': 20, 'max_d': 14, 'step_length': 2, 'thresh': -62, 'factor': 0.03, 'number': 200, 'gyro_factor': 0.2, 'gyro_number': 30, 'origin_direction': 0, 'uturn_thresh1': 0.6, 'uturn_thresh2': 0.4, 'uturn_angle': 2.4}
-	fe = mapping('12rounds.data_json', params)
+	params = {'run_times': 10, 'vertical_turn': True, 'back_direct': 0, 'turn_type_thresh': 1.08, 'gyro_y_only': True, 'spring_step': 0.4, 'gyro_thresh': 0.75, 'gyro_factor': 0.3, 'gyro_number':20, 'minimum_rounds': 8, 'max_d': 14, 'step_length': 2, 'thresh': -62, 'factor': 0.03, 'number': 200, 'gyro_factor': 0.2, 'gyro_number': 30, 'origin_direction': 0, 'uturn_thresh1': 0.6, 'uturn_thresh2': 0.4, 'uturn_angle': 2.4}
+	for i in range(10):
+		params['vertical_turn'] = True
+		params['run_times'] = i + 1
+		params['minimum_rounds'] = i - 1
+		fe = mapping('complex_path.data_json', params)
 	# fe.get_direction()
-	fe.rssi_analyzer()
+		fe.rssi_analyzer()
+
+		params['vertical_turn'] = False
+		fe = mapping('complex_path.data_json', params)
+	# fe.get_direction()
+		fe.rssi_analyzer()
+
 	l1 = 58
 	l2 = 13
 	l3 = 46
